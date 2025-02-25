@@ -102,7 +102,7 @@ model = AutoModelForCausalLM.from_pretrained(model_path,
                                              #max_memory= max_memory #max memory falls benötigt und andere GPUs in Nutzung
                                              #quantization_config=quantization,
                                              #attn_implementation="flash_attention_2", 
-                                             torch_dtype=torch.bfloat16, #Konfiguration für Anwendung von flash_attention
+                                             #torch_dtype=torch.bfloat16, #Konfiguration für Anwendung von flash_attention
                                              ) 
 decode_kwargs={'skip_special_tokens':True}
 streamer = TextStreamer(tokenizer, skip_prompt=True, **decode_kwargs)
