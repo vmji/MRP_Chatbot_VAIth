@@ -12,6 +12,7 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 
 #Indizieren des Vektorraums mit Dokumenten
 from langchain_community.vectorstores import FAISS
+from langchain_core.runnables import RunnablePassthrough
 
 #Laden der eigenen Funktionen aus RAG_functions.py
 import RAG_functions as rag
@@ -28,7 +29,7 @@ model = rag.model
 
 prompt_rag_chat = ChatPromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-Your name is VAIth. Be concise in your answers. Always start your answers with your 'VAIth: '.
+Your name is VAIth.
 You are a helpful assistant and can use the following context to better assist the user:
 
 <context>
@@ -49,7 +50,7 @@ User: {input}
 
 prompt_chat = ChatPromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-Your name is VAIth. Be concise in your answers. Always start your answers with your 'VAIth: '. You are a helpful assistant and expected to assist the user.
+Your name is VAIth. Be concise in your answers. You are a helpful assistant and expected to assist the user.
 The following is the current chat history:
 {chat_history}
 <|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -196,7 +197,7 @@ if __name__ == "__main__":
             prompt = prompt_rag_chat #Prompt definiert als RAG prompt
 
             #Textgenerierung gemäß RAG
-            gen, response = rag.rag_gen(instruction, query_analysis=True, chat_history=get_chat_history,
+            print("VAIth: "); gen, response = rag.rag_gen(instruction, query_analysis=True, chat_history=get_chat_history,
                                         prompt=prompt, retriever=retriever, temperature=temperature, max_new_tokens=max_tokens, print_sources=print_sources,
                                         streamer=streamer)
             chat_history.add_ai_message(response) #Hinzufügen der Modellausgabe zum Chatverlauf
@@ -214,7 +215,9 @@ if __name__ == "__main__":
                      output_hidden_states = False,
                      )
 
-            response = llm.invoke(prompt.invoke({"input":instruction, "chat_history":chat_history}).to_string())
+            chat_chain = {"input": RunnablePassthrough(), "chat_history": get_chat_history} | prompt | llm
+            print("VAIth: "); response = chat_chain.invoke(instruction)
+            # response = llm.invoke(prompt.invoke({"input":instruction, "chat_history":chat_history}).to_string())
             chat_history.add_ai_message(response.split("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n")[-1]) #Hinzufügen der formatierten Modellausgabe zum Chatverlauf
 
             
