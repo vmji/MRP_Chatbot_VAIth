@@ -84,7 +84,7 @@ tokenizer_embedding = AutoTokenizer.from_pretrained("/mount/point/veith/Models/m
 #Initialisierung des Modells
 
 print("Initializing LLM...")
-model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct'
+model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct' # '/mount/point/veith/Models/Llama-3.1-70B-Instruct'
 
 max_memory = {0: "60GB"}# if answ_embedding.lower() in ["y", "yes", "ye", "ja"] else None #Nutzen des max_memory Mappings für die GPUs nur falls ein spezifisches Embedding Modell verwendet wird, um so GPU VRAM zu schonen
 #Quantisierungskonfiguration, falls diese benötigt wird
@@ -312,6 +312,7 @@ def contextualize_chunks(doc_splits: list, doc_pages: list, prompt: PromptTempla
             whole_document_chunks_string = "" #Hilfsgröße, welche Stück für Stück mit den im Intervall betrachteten Texten befüllt wird
             for text in whole_document_chunks: #Durchlauf über alle Dokumentseiten innerhalb des Betrachtungsfensters
                 whole_document_chunks_string = whole_document_chunks_string + "\n" + text #Hinzufügen von relevantem Text zu der Variable
+            whole_document_chunks_string = whole_document_chunks_string.replace(token_pagebreak, '') #entfernen des pagebreak Tokens
             
             context_chunk = chunk_contextualizer.invoke({"context": whole_document_chunks_string, "input": chunk.page_content}) #Kontextualisieren der Chunks mittels LLM
             context_chunk = context_chunk.split("<|start_header_id|>assistant<|end_header_id|>\n")[-1] #parsen des LLM Outputs
