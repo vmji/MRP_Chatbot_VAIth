@@ -295,7 +295,7 @@ def contextualize_chunks(doc_splits: list, doc_pages: list, prompt: PromptTempla
         n = len(documents[mask]) #Seitenzahl des Dokuments
 
         for i in range(len(documents[mask])): #Iteration über alle Seiteneinträge der der aktuellen Quelle, welche mittels [mask] abgerufen wird
-            whole_document = whole_document + "\n" + documents[mask].iloc[i].page_content #Seitenweises erweitern des aktuellen Strings von whole_document
+            whole_document = whole_document + token_pagebreak + documents[mask].iloc[i].page_content #Seitenweises erweitern des aktuellen Strings von whole_document
         #gesamtes Dokument liegt nun als einzelner String vor um and das LLM übergeben zu werden
         whole_document_pagebreaks = whole_document.split(token_pagebreak)[1:] #Aufteilen des Dokuments in Seiten nach pagebreak Token mit auslassen des ersten Eintrag, weil dieser ein leerer String ist
     
