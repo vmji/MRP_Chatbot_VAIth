@@ -84,7 +84,22 @@ tokenizer_embedding = AutoTokenizer.from_pretrained("/mount/point/veith/Models/m
 #Initialisierung des Modells
 
 print("Initializing LLM...")
-model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct' # '/mount/point/veith/Models/Llama-3.1-70B-Instruct'
+# Frage nach zu verwendendem Modell
+model_question = int(input("Which text generation model do you want to use?\n1.\tLlama-3.1-Nemotron-Nano-8B-v1\n2.\tLlama-3.1-8B-Instruct\n3.\tLlama-3.1-Nemotron-70B-Instruct-HF (4bit quantized)\nPlease answer by typing in the corresponding model number: "))
+
+if model_question == 1:
+    model_path = "/mount/point/veith/Models/Llama-3.1-Nemotron-Nano-8B-v1"
+
+elif model_question == 2:
+    model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct'
+
+elif model_question == 3:
+    model_path = "/mount/point/veith/Models/Llama-3.1-70B-Instruct"
+
+else:
+    model_path = '/mount/shared/Models/Llama-3.1-Nemotron-Nano-8B-v1'
+
+model_path = "/mount/point/veith/Models/Llama-3.1-Nemotron-Nano-8B-v1" # '/mount/point/veith/Models/Llama-3.1-70B-Instruct'
 
 max_memory = {0: "60GB"}# if answ_embedding.lower() in ["y", "yes", "ye", "ja"] else None #Nutzen des max_memory Mappings für die GPUs nur falls ein spezifisches Embedding Modell verwendet wird, um so GPU VRAM zu schonen
 #Quantisierungskonfiguration, falls diese benötigt wird
@@ -100,9 +115,9 @@ model = AutoModelForCausalLM.from_pretrained(model_path,
                                              # device='cuda:0'
                                              device_map="auto", #Initialisieren des Modells #Idealfall für Parallelisierung auf GPUs #Auswahl aus ["auto", "balanced", "balanced_low_0", "sequential"]
                                              #max_memory= max_memory #max memory falls benötigt und andere GPUs in Nutzung
-                                             #quantization_config=quantization,
+                                             quantization_config=quantization if model_question == 3 else None,
                                              #attn_implementation="flash_attention_2", 
-                                             #torch_dtype=torch.bfloat16, #Konfiguration für Anwendung von flash_attention
+                                             torch_dtype=torch.bfloat16, #Konfiguration für Anwendung von flash_attention
                                              ) 
 decode_kwargs={'skip_special_tokens':True}
 streamer = TextStreamer(tokenizer, skip_prompt=True, **decode_kwargs)
@@ -234,6 +249,7 @@ def format_docs(docs):
 
 prompt_contextualize = PromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
+detailed thinking off
 Your task is to situate a chunk of text within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
 <document>
 {context}
@@ -244,9 +260,17 @@ Here is the chunk we want to situate within the whole document
 <chunk> 
 {input}
 </chunk>
-Please give a short succinct context to situate this chunk within the overall document<|eot_id|>
+Please give a short succinct and concise context to situate this chunk within the overall document. Write at most 3 sentences.<|eot_id|>
 <|start_header_id|>assistant<|end_header_id|>
 """)
+
+# Änderung des Prompts falls nicht das Modell Llama-3.1-Nemotron-Nano-8B-v1 verwendet wird
+if model_path == '/mount/point/veith/Models/Llama-3.1-Nemotron-Nano-8B-v1':
+    detailed_thinking = "\ndetailed thinking off"
+else:
+    detailed_thinking = "" #leere Ausgabe für detailed_thinking, weil andere Modelle nicht darauf trainiert wurden
+# Verändern der Prompt Templates gemäß Wunsch nach detailliertem Denken
+prompt_contextualize.template = prompt_contextualize.template.replace('\ndetailed thinking off', detailed_thinking)
 
 #Definition des Sprachmodells
 llm_context = model_pipe(do_sample=True, #als LLM wird das Sprachmodell mit dem Standardnamen model ausgewählt
@@ -641,10 +665,11 @@ def rag_env_expand(vector_store_path: str, directory: str = None, file_paths: st
 
 prompt_query = PromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
+detailed thinking off
 Your task is to convert the Input into database search terms with natural language.
 Format the answer like this:
 SEARCH: [search]
-And then stop the generation.
+
 Given a question or input, return a single search term optimized to retrieve the most relevant results from a search engine.
 If there are acronyms or words you are not familiar with, do not try to rephrase them.
 
@@ -653,6 +678,9 @@ If there are acronyms or words you are not familiar with, do not try to rephrase
 Input: {input}<|eot_id|>
 <|start_header_id|>assistant<|end_header_id|>
 """)
+
+# Änderung des Prompts falls nicht das Modell Llama-3.1-Nemotron-Nano-8B-v1 verwendet wird
+prompt_query.template = prompt_query.template.replace('\ndetailed thinking off', detailed_thinking)
 
 @chain
 def query_parser(query: str):
@@ -760,12 +788,11 @@ def rag_gen(instruction : str, prompt: ChatPromptTemplate, retriever : VectorSto
 
     if print_sources == True: #Fals die Quellenangaben mit ausgegeben werden sollen
         for source in gen['context']:
+            print("Sources:")
             if isinstance(source, tuple): #Fallunterscheidung falls retrieval_scores ausgegeben werden -> dies resultiert in Ausgabe von tuple für source mit source[1] als retrieval score
-                print("Sources:")
                 print(source[0].metadata)
                 print(f"Retrieval Score: {source[1]}")
             else:
-                print("Sources:")
                 print(source.metadata)
 
     # Aufräumen

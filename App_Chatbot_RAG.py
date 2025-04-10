@@ -29,7 +29,8 @@ model = rag.model
 
 prompt_rag_chat = ChatPromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-Your name is VAIth.
+detailed thinking off
+Your name is VAIth. Be concise in your answers.
 You are a helpful assistant and can use the following context to better assist the user:
 
 <context>
@@ -50,6 +51,7 @@ User: {input}
 
 prompt_chat = ChatPromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
+detailed thinking off
 Your name is VAIth. Be concise in your answers. You are a helpful assistant and expected to assist the user.
 The following is the current chat history:
 {chat_history}
@@ -150,6 +152,10 @@ retriever = ensemble_retriever | retrieval_fuse_output #neue Kette, welche bewir
 streamer = rag.streamer
 top_p = 0.9
 top_k = 20
+
+ # Verändern der Prompt Templates gemäß Wunsch nach detailliertem Denken
+prompt_rag_chat.messages[0].prompt.template = prompt_rag_chat.messages[0].prompt.template.replace('\ndetailed thinking off', rag.detailed_thinking)
+prompt_chat.messages[0].prompt.template = prompt_chat.messages[0].prompt.template.replace('\ndetailed thinking off', rag.detailed_thinking)
 
 chat_history = ChatMessageHistory() #Initialisieren des Chatverlaufs
 #Erstellen einer Hilfsfunktion, welche den Chatverlauf ausliest und an die RAG Chain übergibt
