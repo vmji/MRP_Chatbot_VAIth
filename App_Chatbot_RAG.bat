@@ -1,0 +1,1 @@
+start powershell -command "& '.\App_Chatbot_RAG.ps1'"

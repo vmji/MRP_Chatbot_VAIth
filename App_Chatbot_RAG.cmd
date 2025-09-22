@@ -3,14 +3,31 @@ setlocal enabledelayedexpansion
 
 :: Verwenden des korrekten Char Encodings
 chcp 65001
+
+:: Load variables from .env file
+if exist ".env" (
+    for /f "usebackq delims=" %%L in (".env") do (
+        set "line=%%L"
+        rem Skip comments and empty lines
+        if not "!line:~0,1!"=="#" if defined line (
+            for /f "tokens=1,* delims==" %%A in ("!line!") do (
+                set "%%A=%%B"
+            )
+        )
+    )
+)
+
 set "FILE_PATHS="
-set /p USERNAME= "Enter your username: " 
-echo '%USERNAME%'
+:: Nutzen username aus .env oder Abfrage wenn dieser nicht festgelegt ist
+if not defined USERNAME (
+    set /p USERNAME= "Enter your username: " 
+) 
+echo 'Welcome %USERNAME%!'
 
 set REMOTE_DIR=/mount/point/%USERNAME%/temporary_rag_files
 echo Uploaded files will be stored in '%REMOTE_DIR%'
 
-call ssh %USERNAME%@10.246.58.13 "mkdir -p %REMOTE_DIR%; cd %REMOTE_DIR%/; rm -rf *; exit"
+call ssh %USERNAME%@%MRP_IP% "mkdir -p %REMOTE_DIR%; cd %REMOTE_DIR%/; rm -rf *.docx *.pdf *.txt *.json *.csv; exit"
 
 :ask
 set /p UPLOAD_FILES= "Do you want to upload datafiles from your local machine? (Y/n) "
@@ -26,7 +43,7 @@ if /i "%FILE_PATH_FROM%"=="exit" goto end
 ::set "FILE_PATHS=!FILE_PATHS! %FILE_PATH_FROM%"
 echo "Copying data from: !FILE_PATH_FROM!\ to:%REMOTE_DIR%/"
 ::Befehl kopiert kompletten Ordner
-scp -r "!FILE_PATH_FROM!\*" %USERNAME%@10.246.58.13:%REMOTE_DIR%/
+scp -r "!FILE_PATH_FROM!\*" %USERNAME%@%MRP_IP%:%REMOTE_DIR%/
 goto loop
 :end
 
@@ -38,7 +55,7 @@ if defined FILE_PATHS (
 
 :: Abfrage ob URLs als Datenquellen verwendet werden sollen
 :ask_url
-::Definition der Listengröße für den Loop
+::Definition der Listengroeße fuer den Loop
 set "urls="
 set /p PASS_URLs= "Do you want to pass URLs to the application? (Y/n) "
 if /i "%PASS_URLs%"=="n" goto end_url
@@ -52,5 +69,5 @@ set "urls=!urls! !URL!"
 goto loop_url
 :end_url
 
-ssh %USERNAME%@10.246.58.13 "/mount/point/veith/.venv/bin/python /mount/point/veith/MRP_Chatbot_VAIth/App_Chatbot_RAG.py %REMOTE_DIR%/ %urls%"
+ssh %USERNAME%@%MRP_IP% "/mount/point/veith/.venv/bin/python /mount/point/veith/MRP_Chatbot_VAIth/App_Chatbot_RAG.py %REMOTE_DIR%/ %urls%"
 pause

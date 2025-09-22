@@ -1,6 +1,8 @@
 import os #Zugriff auf Dateien für RAG
 os.environ['USER_AGENT'] = 'myagent'
+import sys
 
+from typing import Union, List
 import torch
 import gc #GPU Memory Optimierung
 import pandas
@@ -9,6 +11,7 @@ from tqdm.auto import tqdm #Fortschrittsbalken für Promptausgaben
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer, pipeline, BitsAndBytesConfig #Funktionalität Hugging Face Modelle
 # import accelerate #Für Anwendung der Berechnungen auf GPUs
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate #Prompt Templates
+from langchain_core.prompt_values import StringPromptValue
 from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings #Nutzung von Hugging Face Modellen
 
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader, WebBaseLoader, TextLoader, Docx2txtLoader #Laden von PDF Dateien, Webseiten, Pandas Datensätzen, .txt Dateien, Word Dokumente
@@ -18,7 +21,7 @@ from langchain_core.documents.base import Document
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
-from langchain_community.chat_message_histories import ChatMessageHistory #Chast History
+from langchain_community.chat_message_histories import ChatMessageHistory #Chat History
 
 #from langchain_community.document_loaders import GoogleDriveLoader, OneDriveFileLoader #nur falls es unbedingt notwendig, weil Zugriff auf Daten sehr schwierig ist
 
@@ -28,6 +31,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # Funktionen Quellenangaben
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel, RunnableLambda, chain, RunnablePick
+
+FILE_PATH = sys.argv[1] #Pfad zu den Dateien, welche verarbeitet werden sollen
 
 #Konfiguration der Modelle
 
@@ -84,22 +89,6 @@ tokenizer_embedding = AutoTokenizer.from_pretrained("/mount/point/veith/Models/m
 #Initialisierung des Modells
 
 print("Initializing LLM...")
-# Frage nach zu verwendendem Modell
-model_question = int(input("Which text generation model do you want to use?\n1.\tLlama-3.1-Nemotron-Nano-8B-v1\n2.\tLlama-3.1-8B-Instruct\n3.\tLlama-3.1-Nemotron-70B-Instruct-HF (4bit quantized)\nPlease answer by typing in the corresponding model number: "))
-
-if model_question == 1:
-    model_path = "/mount/point/veith/Models/Llama-3.1-Nemotron-Nano-8B-v1"
-
-elif model_question == 2:
-    model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct'
-
-elif model_question == 3:
-    model_path = "/mount/point/veith/Models/Llama-3.1-70B-Instruct"
-
-else:
-    model_path = '/mount/shared/Models/Llama-3.1-Nemotron-Nano-8B-v1'
-
-model_path = "/mount/point/veith/Models/Llama-3.1-Nemotron-Nano-8B-v1" # '/mount/point/veith/Models/Llama-3.1-70B-Instruct'
 
 max_memory = {0: "60GB"}# if answ_embedding.lower() in ["y", "yes", "ye", "ja"] else None #Nutzen des max_memory Mappings für die GPUs nur falls ein spezifisches Embedding Modell verwendet wird, um so GPU VRAM zu schonen
 #Quantisierungskonfiguration, falls diese benötigt wird
@@ -110,12 +99,32 @@ quantization = BitsAndBytesConfig(load_in_4bit=True,
                                   # load_in_8bit=True,
                                   ) #Quantisierungkonfiguration für 4-Bit oder 8-Bit Quantisierung
 
+# Frage nach zu verwendendem Modell
+print("Which text generation model do you want to use?")
+print("1.\tLlama-3.1-8B-Instruct")
+print("2.\tLlama-3.1-70B-Instruct (4bit quantized)")
+print("3.\tQwen2.5-14B-Instruct-1M")
+print("4.\tQwen3-14B")
+model_question = int(input("Please answer by typing in the corresponding model number: "))
+
+if model_question == 1:
+    model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct'
+
+elif model_question == 2:
+    model_path = "/mount/point/veith/Models/Llama-3.1-70B-Instruct"
+
+elif model_question == 3:
+    model_path = "/mount/point/veith/Models/Qwen3-14B"
+
+else:
+    model_path = "/mount/point/veith/Models/Qwen3-14B"
+
 tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') #Initialisieren des Tokenizers
 model = AutoModelForCausalLM.from_pretrained(model_path,
                                              # device='cuda:0'
                                              device_map="auto", #Initialisieren des Modells #Idealfall für Parallelisierung auf GPUs #Auswahl aus ["auto", "balanced", "balanced_low_0", "sequential"]
                                              #max_memory= max_memory #max memory falls benötigt und andere GPUs in Nutzung
-                                             quantization_config=quantization if model_question == 3 else None,
+                                             quantization_config=quantization if model_question == 2 else None,
                                              #attn_implementation="flash_attention_2", 
                                              torch_dtype=torch.bfloat16, #Konfiguration für Anwendung von flash_attention
                                              ) 
@@ -127,6 +136,28 @@ print(f"You are now talking to the {model_path.split('/')[-1]} Model.")
 # Funktionsdefinition
 
 CHUNK_CONTEXT_LEN = 100 #globale Variable, welche in mehreren Funktionen abgerufen wird
+
+# Übersetzung modellspezifischer Tokens, falls nicht default llama Modell ausgewählt wird
+if "llama" not in model_path.lower():
+
+    if "qwen" in model_path.lower(): # Fall dass ein Qwen Modell verwendet wird
+        llama_qwen = {
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>": "<|im_start|>system", #Systemprompt
+            "<|start_header_id|>user<|end_header_id|>": "<|im_start|>user", #Userprompt
+            "<|start_header_id|>assistant<|end_header_id|>": "<|im_start|>assistant", # Beginn Gesprächsanteil Assistent
+            "<|eot_id|>": "<|im_end|>", # Gesprächsrundentoken
+        }
+        llama_translator = llama_qwen # Definition des zu verwendenden dict zum Übersetzen der modellspezifischen Tokens
+    
+    #Definition der Parsing Strings
+    parsing_string = llama_translator['<|start_header_id|>assistant<|end_header_id|>']
+    parsing_string_user = llama_translator['<|start_header_id|>user<|end_header_id|>']
+    parsing_chat_turn_token = llama_translator['<|eot_id|>']
+else:
+    #Definition der Parsing Strings
+    parsing_string = '<|start_header_id|>assistant<|end_header_id|>'
+    parsing_string_user = '<|start_header_id|>user<|end_header_id|>'
+    parsing_chat_turn_token = '<|eot_id|>'
 
 def split_list(lst, group_size): #Hilfsfunktion zum Aufteilen einer Liste in Dreiergruppen ohne Overlap
     return [lst[i:i + group_size] for i in range(0, len(lst), group_size)]
@@ -149,11 +180,11 @@ def load_and_split(loader, chunk_size = tokenizer_embedding.model_max_length):
     "",
     ]
     chunk_context_len = CHUNK_CONTEXT_LEN #maximale Tokenlänge des zusätzlichen Kontexts
-    chunk_overlap=int(chunk_size / 8) #Overlap zwischen Chunks soll ein Achtel der Tokens der benachbarten Chunks beinhalten
 
     #Failsafe falls maximale Kontextfenster Embedding größer als ideal ist
     chunk_size = min(chunk_size, 1024) #maximale Chunklänge in Tokens beträgt 1024 Tokens
     chunk_size = chunk_size - chunk_context_len - 1 #Anzahl maximal codierbarer Tokens des Sprachmodells minus Tokenlänge der Zusammenfassung
+    chunk_overlap=int(chunk_size / 8) #Overlap zwischen Chunks soll ein Achtel der Tokens der benachbarten Chunks beinhalten
 
     documents = loader.load() #Laden der rohen Dokumentdaten
     text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
@@ -235,6 +266,78 @@ def model_pipe(llm = model, llm_tokenizer = tokenizer, do_sample = True, streame
 
     return model_pipe
 
+default_config = {
+    "do_sample": True, 
+    "temperature": 0.6,
+    "top_p": 0.9,
+    "max_new_tokens": 1000,
+    "top_k": 10,
+}
+# Speichereffiziente Lösung der Pipelinedefinition
+class PipelineManager:
+    def __init__(self, model, tokenizer, initial_params=None,):
+                 #streamer = None):
+        self.model = model
+        self.model_path = model.name_or_path
+        self.tokenizer = tokenizer
+        self.current_params = initial_params
+        self.pipeline = None
+        
+        # Modellspezifische Fixes
+        # Fix tokenizer padding für Llama Modelle
+        if 'llama' in self.model_path.lower() and self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        if initial_params!=None:
+            self.get_pipeline(**initial_params)
+    
+    def get_pipeline(self, **params):
+        # Neudefinition der Pipeline findet nur statt wenn sich die Parameter ändern
+        if self.current_params is None:
+            self.current_params = params.copy()
+        if self.current_params != params or self.pipeline is None:
+            # Abändern der neuen Parameter, während alte Parameter beibehalten werden
+            for parameter in params.keys():
+                if parameter in self.current_params:
+                    self.current_params[parameter] = params[parameter]
+            # Hinzufügen von Parametern, die vorher nicht gesetzt waren
+            for parameter in params.keys():
+                if parameter not in self.current_params:
+                    self.current_params[parameter] = params[parameter]
+
+            pipe = pipeline(
+                "text-generation", 
+                model=self.model, 
+                tokenizer=self.tokenizer,
+                # streamer = self.streamer,
+                **self.current_params
+            )
+            self.pipeline = HuggingFacePipeline(pipeline=pipe)
+        return self.pipeline
+
+# Alternative zu model_pipe()
+# Function to wrap tokenization, model.generate() and decoding, so that it can be reused easily
+@chain
+def model_pipe_traceable(prompt: Union[str, StringPromptValue], config: dict = default_config): # config: dict = generation_config):
+    if type(prompt) is StringPromptValue:
+        prompt = prompt.to_string() # Umwandeln in einen str
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    response = model.generate(
+        **inputs,
+        max_new_tokens=config.get("max_new_tokens", 5000),
+        do_sample=config.get("do_sample", True),
+        temperature=config.get("temperature", 0.6),
+        top_p=config.get("top_p", 0.95),
+        top_k=config.get("top_k", 30),
+        return_dict_in_generate=True,
+        output_scores=True,
+        output_attentions=True,
+        output_hidden_states=True,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    response['generated_text'] = tokenizer.decode(response.sequences[0], skip_special_tokens=False)
+    return response
+
 def format_docs(docs):
     if isinstance(docs[0], tuple): #Prüfung ob tuple vorliegt durch Prüfung eines Stellvertreters docs[0]
         return "\n\n".join(doc[0].page_content for doc in docs)
@@ -249,7 +352,6 @@ def format_docs(docs):
 
 prompt_contextualize = PromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-detailed thinking off
 Your task is to situate a chunk of text within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
 <document>
 {context}
@@ -264,27 +366,20 @@ Please give a short succinct and concise context to situate this chunk within th
 <|start_header_id|>assistant<|end_header_id|>
 """)
 
-# Änderung des Prompts falls nicht das Modell Llama-3.1-Nemotron-Nano-8B-v1 verwendet wird
-if model_path == '/mount/point/veith/Models/Llama-3.1-Nemotron-Nano-8B-v1':
-    detailed_thinking = "\ndetailed thinking off"
-else:
-    detailed_thinking = "" #leere Ausgabe für detailed_thinking, weil andere Modelle nicht darauf trainiert wurden
-# Verändern der Prompt Templates gemäß Wunsch nach detailliertem Denken
-prompt_contextualize.template = prompt_contextualize.template.replace('\ndetailed thinking off', detailed_thinking)
 
-#Definition des Sprachmodells
-llm_context = model_pipe(do_sample=True, #als LLM wird das Sprachmodell mit dem Standardnamen model ausgewählt
-                    temperature = 0.6,
-                    top_p = 0.9,
-                    max_new_tokens = CHUNK_CONTEXT_LEN, #maximale Anzahl zu generierender Tokens gemäß globaler Variable CHUNK_CONTEXT_LEN
-                    penalty_alpha = 0,
-                    top_k = 10,
-                    output_scores = False,
-                    output_attention = False,
-                    output_hidden_states = False,
-                    )
+#Definition des Sprachmodells # Verwendung von Pipeline Manager um Speicher zu sparen
+config_context = {
+    "do_sample": True, 
+    "temperature": 0.6,
+    "top_p": 0.9,
+    "max_new_tokens": CHUNK_CONTEXT_LEN, #maximale Anzahl zu generierender Tokens gemäß globaler Variable CHUNK_CONTEXT_LEN
+    "penalty_alpha":0,
+    "top_k": 10,
+}
+llm_context_pipe_manager = PipelineManager(model, tokenizer, initial_params=config_context)
+llm_context = llm_context_pipe_manager.get_pipeline()
 
-def contextualize_chunks(doc_splits: list, doc_pages: list, prompt: PromptTemplate = prompt_contextualize, llm: HuggingFacePipeline = llm_context):
+def contextualize_chunks(doc_splits: list, doc_pages: list, prompt: PromptTemplate = prompt_contextualize, llm = llm_context):
 
     """Contextualizes document chunks in relations to their significance inside the whole document via invocation of an LLM."""
 
@@ -339,7 +434,7 @@ def contextualize_chunks(doc_splits: list, doc_pages: list, prompt: PromptTempla
             whole_document_chunks_string = whole_document_chunks_string.replace(token_pagebreak, '') #entfernen des pagebreak Tokens
             
             context_chunk = chunk_contextualizer.invoke({"context": whole_document_chunks_string, "input": chunk.page_content}) #Kontextualisieren der Chunks mittels LLM
-            context_chunk = context_chunk.split("<|start_header_id|>assistant<|end_header_id|>\n")[-1] #parsen des LLM Outputs
+            context_chunk = context_chunk.split(f"{parsing_string}\n")[-1] #parsen des LLM Outputs
             chunks[mask].iloc[i].page_content = context_chunk + ";" + chunk.page_content #ersetzen der alten Chunks mit den neuem LLM generierten Kontext als Präfix innerhalb Variable chunks
             progress_bar.update(1)
             #splits[i].page_content wird durch Beziehung zu Variable chunks automatisch rückwirkend ersetzt
@@ -355,7 +450,7 @@ def save_csv_data(doc_splits: list, save_dir: str):
                                 "start_index": [doc_splits[i].metadata['start_index'] for i in range(len(doc_splits))]})
     #speichern des Dataframes
     directory = save_dir + '.csv' #erweitern des save_dir um die Endung .csv zum Abspeichern als eigene Datei speziell für BM25 retrieval
-    return df_splits.to_csv(directory) #abspeichern der Datei in ein auslesbares Format mittels load_csv_data
+    return df_splits.to_csv(directory, escapechar='\\') #abspeichern der Datei in ein auslesbares Format mittels load_csv_data
 
 def load_csv_data(load_dir:str):
     '''Loads .csv tables as Dataframes and formats the output as a dataframe, text data and metadata.'''
@@ -382,6 +477,10 @@ def rag_env(directory: str = None, file_paths: str = None, data_path: str = None
 
     """
     Function to create a vectorized RAG environment. Input consists of either the folder path or a list of specific file paths. The output is the retriever for the vector store of the documents.
+    Args:
+    directory (str): Path to directory containing files to be embedded into a vector store.
+    file_paths (str or list): Path(s) to specific files to be embedded into a vector store.
+    data_path (str): Path to a (potential) vector store directory, where the file path omits the file extension .csv due to programmatic reasons. Used to embed exisitng documents with a different embedding model.
     """
     if isinstance(file_paths, str): #Umwandlung file_path in list, falls ein str eingegeben wird
         file_paths = [file_paths]
@@ -554,108 +653,130 @@ def rag_env_expand(vector_store_path: str, directory: str = None, file_paths: st
 
     assert isinstance(directory, str) | isinstance(file_paths, list), "Either enter a valid folder path as string or enter file paths compiled into a single list object."
     #Überprüfen ob mindestens eine korrekte Eingabe für die Variablen directory oder file-paths vorliegt
-
     docs = [] #Initialisierung der Liste, welche die Dokumenteninformationen beinhalten wird
 
-    print("Contextualizing document chunks...")
-
-    if isinstance(directory, str): #Eingängliche Überprüfung ob directory angegeben wurde bevor die Daten ausgelesen werden
-
-        pdf_loader = DirectoryLoader(directory, glob='./*.pdf', loader_cls=PyPDFLoader)
-        splits, pages = load_and_split(pdf_loader) #aufteilen der Dokumente
-        if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
-            splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-        docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
-
-        txt_loader = DirectoryLoader(directory, glob='./*.txt', loader_cls=TextLoader)
-        splits, pages = load_and_split(txt_loader) #aufteilen der Dokumente
-        if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
-            splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-        docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
-
-        word_loader = DirectoryLoader(directory, glob='./*.docx', loader_cls=Docx2txtLoader)
-        splits, pages = load_and_split(word_loader) #aufteilen der Dokumente
-        if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
-            splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-        docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
-
-        csv_loader = DirectoryLoader(directory, glob='./*.csv', loader_cls=CSVLoader)
-        splits, pages = load_and_split(csv_loader) #aufteilen der Dokumente
-        if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
-            splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-        docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
-
-        json_loader = DirectoryLoader(directory, glob='./*.json', loader_cls=JSONLoader)
-        splits, pages = load_and_split(json_loader) #aufteilen der Dokumente
-        if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
-            splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-        docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
-    
-
-
-    if isinstance(file_paths, list): #Eingängliche Überprüfung ob file_paths angegeben wurden bevor die Daten ausgelesen werden
-
-        for file in file_paths: #Iterieren über alle angegebenen Dateipfade
-            
-            #Fallunterscheidung der Loader abhängig von Dateiendung #keine Änderung wie beim directory notwendig, weil Dateien nur bei expliziter Nennung eingelesen werden
-            if file.endswith('.pdf'):
-                pdf_loader = PyPDFLoader(file)
-                splits, pages = load_and_split(pdf_loader)
-                if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
-                    splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-                docs.extend(splits)
-
-            elif file.endswith('.txt'):
-                txt_loader = TextLoader(file)
-                splits, pages = load_and_split(txt_loader)
-                if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
-                    splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-                docs.extend(splits)
-
-            elif file.endswith('.docx'):
-                word_loader = Docx2txtLoader(file)
-                splits, pages = load_and_split(word_loader)
-                if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
-                    splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-                docs.extend(splits)
-            
-            elif file.endswith('.csv'):
-                csv_loader = CSVLoader(file, csv_args={'delimiter':','})
-                splits, pages = load_and_split(csv_loader)
-                if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
-                    splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-                docs.extend(splits)
-            
-            elif file.startswith('https://'):
-                web_loader = WebBaseLoader(file)
-                splits, pages = load_and_split(web_loader)
-                if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
-                    splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
-                docs.extend(splits)
-    #docs #Zusammengestellte Dokumente als Liste
-
+    # Frühes Laden der Vektordatenbank, um frühe Überprüfung durchzuführen, ob hochgeladene Dokumente bereits im Speicher vorhanden sind
     vector_store = vector_store_type.load_local(folder_path=vector_store_path,
                                     embeddings=embedding,
                                     allow_dangerous_deserialization=True)
-    vector_store.add_documents(documents=docs) #Befehl um neue Dokumente dem Vector Store hinzuzufügen
-    df, texts, metadata = load_csv_data(vector_store_path)
-    #Hinzufügen von neuen Zeilen in den Dataframe
-    df_splits = pandas.DataFrame({"content":[docs[i].page_content for i in range(len(docs))],
-                                "source":[docs[i].metadata['source'] for i in range(len(docs))],
-                                "page": [docs[i].metadata['page'] for i in range(len(docs))],
-                                "start_index": [docs[i].metadata['start_index'] for i in range(len(docs))]}) #erstellen Dataframe bestehend aus neuen Dokumenten
-    #verbinden der Datensätze zu gräßerem Datensatz
-    df = pandas.concat([df, df_splits], ignore_index = True)
-    # Aufräumen
-    gc.collect() #Befreien der GPU Memory
-    torch.cuda.empty_cache() #Releases all unoccupied cached memory currently held by the caching allocator so that those can be used in other GPU application and visible in nvidia-smi
 
-    #Speichern des Vector Stores
-    if save_dir != None:
-        assert os.path.exists(save_dir), "Please enter a valid path"
-        vector_store.save_local(save_dir)
-        dir_df = save_dir + '.csv'
-        df.to_csv(dir_df) #abspeichern der Datei in ein auslesbares Format mittels load_csv_data #Änderung bedingt durch Ergänzung des vorhandenen Dataframes
+    # Ausgabe aller Quellen, welche im Vektorspeicher hinterlegt sind
+    vector_store_sources = [] # leere Liste, welche mit Quellen aus der Vektordatenbank befüllt wird
+    for key in vector_store.docstore.__dict__['_dict']: # Ausgabe der keys des Vektorspeichers
+        source = vector_store.docstore.__dict__['_dict'][key].metadata['source'] # Speichern des Quellpfades in variable
+        source_name = source.rsplit('/')[-1] if '/' in source else source.rsplit('\\')[-1] # Extrahieren des Dateinamens aus Dateipfad # Dateipfad wird gemäß Linux oder Windows Pfadschreibweise getrennt
+        #Sicherstellen, dass nur einzigartige Namen in Liste aufgenommen werden
+        if source_name not in vector_store_sources: # Aufnahme des Dateinamens in Liste, wenn dieser noch nicht enthalten ist
+            vector_store_sources.append(source_name)
+
+    sources_list = os.listdir(directory) # Liste aller Quellen, welche in Vektordatenspeicher aufgenommen werden sollen
+    for source in sources_list: # Iterieren über alle hochgeladenen Dateien
+
+        if source in vector_store_sources: #Prüfung, ob Datei bereits in vektordatenbank vorhanden ist
+
+            os.remove(FILE_PATH + '/' + source) # Löschen der Datei falls sie bereits im Vektorspeicher vorhanden ist
+            print(f"Document {source} removed, because it is already saved in the vector store.")
+
+    if len(os.listdir(directory)) > 0: #Überprüfen, ob Dateien im Ordner vorhanden sind bevor der Programmablauf zu Aufnahme neuer Dokumente gestartet wird
+        print("Contextualizing document chunks...")
+
+        if isinstance(directory, str): #Eingängliche Überprüfung ob directory angegeben wurde bevor die Daten ausgelesen werden
+
+            pdf_loader = DirectoryLoader(directory, glob='./*.pdf', loader_cls=PyPDFLoader)
+            splits, pages = load_and_split(pdf_loader) #aufteilen der Dokumente
+            if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
+                splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+            docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
+
+            txt_loader = DirectoryLoader(directory, glob='./*.txt', loader_cls=TextLoader)
+            splits, pages = load_and_split(txt_loader) #aufteilen der Dokumente
+            if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
+                splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+            docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
+
+            word_loader = DirectoryLoader(directory, glob='./*.docx', loader_cls=Docx2txtLoader)
+            splits, pages = load_and_split(word_loader) #aufteilen der Dokumente
+            if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
+                splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+            docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
+
+            csv_loader = DirectoryLoader(directory, glob='./*.csv', loader_cls=CSVLoader)
+            splits, pages = load_and_split(csv_loader) #aufteilen der Dokumente
+            if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
+                splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+            docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
+
+            json_loader = DirectoryLoader(directory, glob='./*.json', loader_cls=JSONLoader)
+            splits, pages = load_and_split(json_loader) #aufteilen der Dokumente
+            if (len(splits) > 0) & (contextualization==True): #überspringen der folgenden Schritte, wenn keine Dokumente des gewünschten Datentyps im angegebenen directory vorhanden sind oder keine Kontextualisierung erwünscht ist
+                splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+            docs.extend(splits) #Aufnehmen der gespaltenen Dokumentenabschnitte in list
+        
+
+
+        if isinstance(file_paths, list): #Eingängliche Überprüfung ob file_paths angegeben wurden bevor die Daten ausgelesen werden
+
+            for file in file_paths: #Iterieren über alle angegebenen Dateipfade
+                
+                #Fallunterscheidung der Loader abhängig von Dateiendung #keine Änderung wie beim directory notwendig, weil Dateien nur bei expliziter Nennung eingelesen werden
+                if file.endswith('.pdf'):
+                    pdf_loader = PyPDFLoader(file)
+                    splits, pages = load_and_split(pdf_loader)
+                    if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
+                        splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+                    docs.extend(splits)
+
+                elif file.endswith('.txt'):
+                    txt_loader = TextLoader(file)
+                    splits, pages = load_and_split(txt_loader)
+                    if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
+                        splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+                    docs.extend(splits)
+
+                elif file.endswith('.docx'):
+                    word_loader = Docx2txtLoader(file)
+                    splits, pages = load_and_split(word_loader)
+                    if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
+                        splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+                    docs.extend(splits)
+                
+                elif file.endswith('.csv'):
+                    csv_loader = CSVLoader(file, csv_args={'delimiter':','})
+                    splits, pages = load_and_split(csv_loader)
+                    if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
+                        splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+                    docs.extend(splits)
+                
+                elif file.startswith('https://'):
+                    web_loader = WebBaseLoader(file)
+                    splits, pages = load_and_split(web_loader)
+                    if contextualization==True: #Auslassen Kontextualisierung falls diese unerwünscht ist
+                        splits = contextualize_chunks(doc_splits=splits, doc_pages=pages) #kontextualisieren der Dokumentenchunks
+                    docs.extend(splits)
+        #docs #Zusammengestellte Dokumente als Liste
+
+        # Hinzufügen von neuen Dokumenten zur Vektordatenbank
+        vector_store.add_documents(documents=docs) #Befehl um neue Dokumente dem Vector Store hinzuzufügen
+        df, texts, metadata = load_csv_data(vector_store_path)
+        #Hinzufügen von neuen Zeilen in den Dataframe
+        df_splits = pandas.DataFrame({"content":[docs[i].page_content for i in range(len(docs))],
+                                    "source":[docs[i].metadata['source'] for i in range(len(docs))],
+                                    "page": [docs[i].metadata['page'] for i in range(len(docs))],
+                                    "start_index": [docs[i].metadata['start_index'] for i in range(len(docs))]}) #erstellen Dataframe bestehend aus neuen Dokumenten
+        #verbinden der Datensätze zu gräßerem Datensatz
+        df = pandas.concat([df, df_splits], ignore_index = True)
+        # Aufräumen
+        gc.collect() #Befreien der GPU Memory
+        torch.cuda.empty_cache() #Releases all unoccupied cached memory currently held by the caching allocator so that those can be used in other GPU application and visible in nvidia-smi
+
+        #Speichern des Vector Stores
+        if save_dir != None:
+            assert os.path.exists(save_dir), "Please enter a valid path"
+            vector_store.save_local(save_dir)
+            dir_df = save_dir + '.csv'
+            df.to_csv(dir_df, escapechar='\\') #abspeichern der Datei in ein auslesbares Format mittels load_csv_data #Änderung bedingt durch Ergänzung des vorhandenen Dataframes
+    else:
+        print("No new documents found in the directory. No documents added to the vector store.")
 
     return vector_store, docs
 
@@ -665,7 +786,6 @@ def rag_env_expand(vector_store_path: str, directory: str = None, file_paths: st
 
 prompt_query = PromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-detailed thinking off
 Your task is to convert the Input into database search terms with natural language.
 Format the answer like this:
 SEARCH: [search]
@@ -679,44 +799,67 @@ Input: {input}<|eot_id|>
 <|start_header_id|>assistant<|end_header_id|>
 """)
 
-# Änderung des Prompts falls nicht das Modell Llama-3.1-Nemotron-Nano-8B-v1 verwendet wird
-prompt_query.template = prompt_query.template.replace('\ndetailed thinking off', detailed_thinking)
+# Anpassen der Tokens an das verwendete Modell falls nicht default Llama verwendet wird
+if "llama" not in model_path.lower():
+    prompts = [prompt_contextualize, prompt_query]
+
+    # Ändern der Tokens
+    for prompt in prompts:
+        for key in llama_translator:
+            prompt.template = prompt.template.replace(key, llama_translator[key]) 
+
+if "qwen3" in model_path.lower():
+    # Gemeinsames deaktivieren der Qwen3 Denkprozesse NACHDEM die Tokens angepasst wurden, ansonsten führt dies zu Bugs
+    prompt_contextualize.template = prompt_contextualize.template.replace("<|im_start|>assistant", "<|im_start|>assistant\n<think>\n\n</think>") # Diese Tokens deaktivieren Denkprozess bei Qwen3
+    prompt_query.template = prompt_query.template.replace("<|im_start|>assistant", "<|im_start|>assistant\n<think>\n\n</think>") # Diese Tokens deaktivieren Denkprozess bei Qwen3
 
 @chain
 def query_parser(query: str):
     """Parses the output of the query analyzer, so it only returns the search_query"""
     new_query = query.split(sep="SEARCH: ", maxsplit=-1)[-1]
-    new_query = new_query.split(sep="<|eot_id|>")[0]
+    new_query = new_query.split(sep=parsing_chat_turn_token)[0]
     task_description = "Given a web search query, retrieve relevant passages that are relevant to the query."
     task = f'Instruct: {task_description}\nQuery: {new_query}' #Ausgabe für Instruction trainierte Embedding Modelle #new_query fungiert als geeigneter Suchbegriff und task_description beschreibt den Suchkontext
     # Struktur der Task ist modellspezifisch anzupassen
-    # print(task) #Für Debugging
     return task #new_query
 
+# Definition der zu verwendenden Pipelines für llm und llm_query
+config_text_gen = {
+    "do_sample": True, 
+    "temperature": 0.6,
+    "top_p": 0.9,
+    "max_new_tokens": 1000,
+    "penalty_alpha":0.3,
+    "top_k": 20,
+    "streamer": streamer,
+}
+llm_pipe_manager = PipelineManager(model, tokenizer, initial_params=config_text_gen)
+llm = llm_pipe_manager.get_pipeline()
 
-def rag_gen(instruction : str, prompt: ChatPromptTemplate, retriever : VectorStoreRetriever, chat_history, extra = dict(), query_analysis = True,
-            do_sample = True, streamer = streamer, streamer_query=None, temperature = 0.6, top_p = 0.9,
-            max_new_tokens = 1000, penalty_alpha = 0.3, top_k = 10, output_scores = False, output_attention = False, output_hidden_states = False, retrieval_scores = False,
-            print_sources = True,):
+config_rag_query = {
+    "do_sample": False, 
+    "temperature": None,
+    "top_p": None,
+    "max_new_tokens": 100,
+    "top_k": None,
+    "streamer": None,
+}
+llm_query_pipe_manager = PipelineManager(model, tokenizer, initial_params=config_rag_query)
+llm_query = llm_query_pipe_manager.get_pipeline()
+
+def rag_gen(instruction : Union[str, List[str]], prompt: ChatPromptTemplate, retriever : VectorStoreRetriever, chat_history, extra = dict(), query_analysis = True,
+            pipeline_textgen = llm, pipeline_rag_query = llm_query, print_sources = True,):
 
     #Überprüfen der Eingaben
     assert isinstance(instruction, str), "Please enter the instruction in form of a string"
 
     assert isinstance(extra, dict), "Please enter the extra variables in form of string(s) inside a dictionary, with the placeholder variable inside the prompt as keys and the corresponding strings as values"
 
-    #Definition der zu verwendenden Modellpipeline
-
-    llm = model_pipe(do_sample=do_sample,
-                     streamer=streamer,
-                     temperature = temperature,
-                     top_p = top_p,
-                     max_new_tokens = max_new_tokens,
-                     penalty_alpha = penalty_alpha,
-                     top_k = top_k,
-                     output_scores = output_scores,
-                     output_attention = output_attention,
-                     output_hidden_states = output_hidden_states,
-                     )
+    if isinstance(instruction, list): # Deaktivieren des Streamers falls eine Batcheingabe erfolgt
+        config_text_gen = {
+            "streamer": None
+        }
+        pipeline_textgen = llm_pipe_manager.get_pipeline(**config_text_gen) # Anpassen des Pipelinemanagers des Modells gemäß Nutzerwünschen
 
 
     rag_chain = (
@@ -724,7 +867,7 @@ def rag_gen(instruction : str, prompt: ChatPromptTemplate, retriever : VectorSto
         RunnablePassthrough.assign(context=(lambda x: format_docs(x["context"])))# Formatieren des eingegebenen Kontexts
         #format_docs formatiert die Docs, sodass nur konkatenierter page_content wiedergegeben wird und beschränkt die Textgenerierung
         | prompt
-        | llm
+        | pipeline_textgen
         | StrOutputParser()
     )
 
@@ -740,16 +883,8 @@ def rag_gen(instruction : str, prompt: ChatPromptTemplate, retriever : VectorSto
         ).assign(answer=rag_chain)
     
     else:
-        #Zunächst Definition der LLM Pipeline zur Generierung der Suchquery
-        llm_query = model_pipe(do_sample=False, #Deaktivieren des Samplings für deterministische Query-Generierung
-                     streamer=streamer_query,
-                     temperature = None,
-                     top_p = None,
-                     max_new_tokens = 100,
-                     top_k = 10,
-                     )
         
-        query_analyzer = {"input": RunnablePassthrough()} | prompt_query | llm_query | query_parser | retriever #Definition der neuen retrieval chain, welche Inhalte gemäß der neuen Query heraussucht
+        query_analyzer = {"input": RunnablePassthrough()} | prompt_query | pipeline_rag_query | query_parser | retriever #Definition der neuen retrieval chain, welche Inhalte gemäß der neuen Query heraussucht
 
         rag_chain_dict = {"context": query_analyzer, "chat_history": chat_history, "input": RunnablePassthrough()}
         if len(extra) >= 1:
@@ -765,9 +900,15 @@ def rag_gen(instruction : str, prompt: ChatPromptTemplate, retriever : VectorSto
         for i in extra.keys():
             rag_chain_dict[i] = extra[i]
         rag_chain_dict['input'] = instruction
-        gen = rag_chain_with_source.invoke(rag_chain_dict) 
+        if isinstance(instruction, str): # Überprüfung ob Batcheingaben vorliegen oder nur einzelne Eingaben
+            gen = rag_chain_with_source.invoke(rag_chain_dict)
+        else:
+            gen = rag_chain_with_source.batch(rag_chain_dict)
     else:
-        gen = rag_chain_with_source.invoke(instruction) 
+        if isinstance(instruction, str): # Überprüfung ob Batcheingaben vorliegen oder nur einzelne Eingaben
+            gen = rag_chain_with_source.invoke(instruction) 
+        else:
+            gen = rag_chain_with_source.batch(rag_chain_dict)
     #Ablauf: Zunächst wird die Frage "question" für die Variable {input} in den Prompt eingegeben
     #Daraufhin lädt der Retriever Dokumente aus dem Vector Store der Variable vectorstore mit der höchsten Kosinusähnlichkeit (default)
     #Auf die beschaffenen Dokumente wird die Funktion format_docs() angewandt -> Die Dokumente werden konkateniert
@@ -779,21 +920,41 @@ def rag_gen(instruction : str, prompt: ChatPromptTemplate, retriever : VectorSto
 
     #Parsing der Ausgabe
 
-    response = gen["answer"].split("<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n") #aufteilen string sodass nur Modellausgabe ohne Kontext stattfindet aber mit Frage #geeigneter Split ist promptabhängig
-    response = response[-1] #Definition der Antwort als das letzte Listenelement, welches den String nach dem Separator "</context>\n\n" darstellt
-    response_question = response.split("<|eot_id|>")[0] #Speichern des Question Strings, welcher nach dem Token <|eot_id|> endet
-    response_answer = response.split("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n")[-1] #Trennen nach Prompt Tokens, welche den Antwortbereich für das Modell signalisieren
-    response = response_question + response_answer #Zusammenfügen der Frage und Antwort
-    #print(response[0])
+    if isinstance(instruction, str): # Überprüfung ob Batcheingaben vorliegen oder nur einzelne Eingaben
+        response = gen["answer"].split(f"{parsing_string_user}\n") #aufteilen string sodass nur Modellausgabe ohne Kontext stattfindet aber mit Frage #geeigneter Split ist promptabhängig
+        response = response[-1] #Definition der Antwort als das letzte Listenelement, welches den String nach dem Separator "</context>\n\n" darstellt
+        response_question = response.split(parsing_chat_turn_token)[0] #Speichern des Question Strings, welcher nach dem Token <|eot_id|> endet
+        response_answer = response.split(f"{parsing_string}\n")[-1] #Trennen nach Prompt Tokens, welche den Antwortbereich für das Modell signalisieren
+        response = response_question + response_answer #Zusammenfügen der Frage und Antwort
+    else:
+        for i in range(len(gen)):
+            response = gen[i]["answer"].split(f"{parsing_string_user}\n") #aufteilen string sodass nur Modellausgabe ohne Kontext stattfindet aber mit Frage #geeigneter Split ist promptabhängig
+            response = response[-1] #Definition der Antwort als das letzte Listenelement, welches den String nach dem Separator "</context>\n\n" darstellt
+            response_question = response.split(parsing_chat_turn_token)[0] #Speichern des Question Strings, welcher nach dem Token <|eot_id|> endet
+            response_answer = response.split(f"{parsing_string}\n")[-1] #Trennen nach Prompt Tokens, welche den Antwortbereich für das Modell signalisieren
+            response = response_question + '\n' + response_answer #Zusammenfügen der Frage und Antwort
+            print(response[i])
 
     if print_sources == True: #Fals die Quellenangaben mit ausgegeben werden sollen
-        for source in gen['context']:
-            print("Sources:")
-            if isinstance(source, tuple): #Fallunterscheidung falls retrieval_scores ausgegeben werden -> dies resultiert in Ausgabe von tuple für source mit source[1] als retrieval score
-                print(source[0].metadata)
-                print(f"Retrieval Score: {source[1]}")
-            else:
-                print(source.metadata)
+
+        if isinstance(instruction, str): # Überprüfung ob Batcheingaben vorliegen oder nur einzelne Eingaben
+            print("Sources:\n")
+            for source in gen['context']:
+                if isinstance(source, tuple): #Fallunterscheidung falls retrieval_scores ausgegeben werden -> dies resultiert in Ausgabe von tuple für source mit source[1] als retrieval score
+                    print(source[0].metadata)
+                    print(f"Retrieval Score: {source[1]}")
+                else:
+                    print(source.metadata)
+        else:
+            for i in range(len(gen)):
+                for source in gen[i]['context']:
+                    if isinstance(source, tuple): #Fallunterscheidung falls retrieval_scores ausgegeben werden -> dies resultiert in Ausgabe von tuple für source mit source[1] als retrieval score
+                        print(f"Sources for the input '{gen[i]['input']}':\n")
+                        print(source[0].metadata)
+                        print(f"Retrieval Score: {source[1]}")
+                    else:
+                        print(f"Sources for the input '{gen[i]['input']}':\n")
+                        print(source.metadata)
 
     # Aufräumen
     gc.collect() #Befreien der GPU Memory
