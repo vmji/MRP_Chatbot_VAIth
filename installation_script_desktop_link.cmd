@@ -11,7 +11,7 @@ if exist ".shortcut_created" (
 set "SCRIPT_DIR=%~dp0"
 
 :: Erstellen desktop shortcut mit dynamischen paths
-powershell -Command "$scriptDir = '%SCRIPT_DIR%'; $targetPath = Join-Path -Path $scriptDir -ChildPath 'App_Chatbot_RAG.cmd'; $iconPath = Join-Path -Path $scriptDir -ChildPath 'App Icon.ico'; $WshShell = New-Object -comObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('C:\Users\Public\Desktop\VAIth Chatbot.lnk'); $Shortcut.TargetPath = $targetPath; $Shortcut.IconLocation = $iconPath; $Shortcut.Save()"
+powershell -Command "$scriptDir = '%SCRIPT_DIR%'; $targetPath = Join-Path -Path $scriptDir -ChildPath 'App_Chatbot_RAG.bat'; $iconPath = Join-Path -Path $scriptDir -ChildPath 'App Icon.ico'; $WshShell = New-Object -comObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('C:\Users\Public\Desktop\VAIth Chatbot.lnk'); $Shortcut.TargetPath = $targetPath; $Shortcut.IconLocation = $iconPath; $Shortcut.Save()"
 
 :: Erstellen flag file um wiederholte Erstellung zu vermeiden
 echo. > .shortcut_created
