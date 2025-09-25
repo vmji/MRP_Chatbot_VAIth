@@ -339,10 +339,77 @@ def model_pipe_traceable(prompt: Union[str, StringPromptValue], config: dict = d
     return response
 
 def format_docs(docs):
-    if isinstance(docs[0], tuple): #Prüfung ob tuple vorliegt durch Prüfung eines Stellvertreters docs[0]
-        return "\n\n".join(doc[0].page_content for doc in docs)
-    else:
-        return "\n\n".join(doc.page_content for doc in docs)
+    # Sortieren der Dokumente
+    # Gruppieren der Dokumente nach Quelle
+    docs_by_source = {}
+    is_tuple = isinstance(docs[0], tuple)
+    for i, doc_item in enumerate(docs):
+        doc = doc_item[0] if is_tuple else doc_item
+        source = doc.metadata['source']
+        if source not in docs_by_source: # Prüfen ob Quelle bereits in dict vorhanden ist
+            docs_by_source[source] = [] # Aufnehmen neuer Quelle
+        # Speichern des originalen Dokuments zusammen mit dem ursprünglichen Index
+        docs_by_source[source].append({'item': doc_item, 'original_index': i})
+    # Sortieren der Dokumente innerhalb jeder Quelle
+    for source in docs_by_source:
+        # Sortieren nach Seite und Startindex
+        docs_by_source[source].sort(key=lambda x: (
+            (x['item'][0] if is_tuple else x['item']).metadata.get('page', 0),
+            (x['item'][0] if is_tuple else x['item']).metadata.get('start_index', 0)
+        ))
+
+    # Rekonstruieren der sortierten Dokumentenliste basierend auf der ursprünglichen Reihenfolge der Quellen
+    sorted_docs = [None] * len(docs)
+    processed_indices = set()
+
+    for i, doc_item in enumerate(docs): # Iteration über die ursprüngliche Liste
+        if i in processed_indices: # Überspringen bereits verarbeiteter Dokumente
+            continue
+
+        doc = doc_item[0] if is_tuple else doc_item # Auslesen des Dokuments
+        source = doc.metadata['source'] # Auslesen der Quelle
+        
+        # Chronologisch sortierte Gruppe von Dokumenten der aktuellen Quelle
+        sorted_group = docs_by_source[source]
+        
+        # Aufnehmen der sortierten Dokumente an den ursprünglichen Positionen
+        for group_item in sorted_group:
+            # Finden der nächsten freien Position in sorted_docs
+            insert_pos = i
+            while sorted_docs[insert_pos] is not None: # Sicherstellen, dass die Position frei ist
+                insert_pos += 1
+            sorted_docs[insert_pos] = group_item['item'] # Aufnehmen des Dokuments an der freien Position
+            processed_indices.add(group_item['original_index']) # Markieren des Dokuments als verarbeitet
+    
+    # Filtern von None-Werten, falls vorhanden
+    sorted_docs = [d for d in sorted_docs if d is not None]
+    
+    docs_formatted = []
+    for doc_item in sorted_docs:
+        doc = doc_item[0] if is_tuple else doc_item
+        # Erstellen von dem Präfix zur Kontextualisierung der abgerufenen Dokumente
+        if '\\' in doc.metadata['source']: # Prüfen ob Windows oder Linux Pfadstruktur vorliegt
+            split_char = '\\'
+        elif '/' in doc.metadata['source']:
+            split_char = '/'
+        else: # Zutreffend für bspw. Webseiten
+            split_char = 'https://'
+
+        source_name = doc.metadata['source'].split(split_char)[-1] # Sammlung von Informationen aus dem Dokument zur Kontextualisierung des Auszugs
+        if split_char != 'https://': # Falls es sich um eine Datei handelt, wird die Dateiendung aus dem Namen entfernt
+            source_name = source_name.split('.')[0] # Entfernen der Dateiendung falls es sich um eine Datei handelt
+        prefix = f"Document: {source_name}"
+        # Hinzufügen zusätzlicher Dokumentinformationen
+        if 'title' in doc.metadata:
+            prefix += f", Title: {doc.metadata['title']}"
+        if 'page' in doc.metadata:
+            prefix += f", Page: {doc.metadata['page']}"
+        if 'author' in doc.metadata:
+            prefix += f", Author: {doc.metadata['author']}"
+        # Zusammenführen Präfix und Dokumenteninhalt
+        doc_formatted = f'{prefix}\n{doc.page_content}'
+        docs_formatted.append(doc_formatted)
+    return "\n\n".join(docs_formatted)
     
 #######################################################################################################################################################################################################
 #Definition von default Größen bei der Kontextualisierung von Dokumenten

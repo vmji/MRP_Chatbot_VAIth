@@ -37,7 +37,7 @@ You are a helpful assistant and can use the following context to better assist t
 </context>
 
 If the context is irrelevant to the dialogue with the user, you may ignore it.
-If the context is relevant to the interaction with the user you MUST refer to it.
+If the context is relevant to the interaction with the user you MUST refer to it and cite the passages you are referencing in your answer.
 The following is the current chat history:
 {chat_history}
 <|eot_id|><|start_header_id|>user<|end_header_id|>
