@@ -3,12 +3,13 @@ os.environ['USER_AGENT'] = 'myagent'
 import sys
 
 from typing import Union, List
+import time
 import torch
 import gc #GPU Memory Optimierung
 import pandas
 from tqdm.auto import tqdm #Fortschrittsbalken für Promptausgaben
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer, pipeline, BitsAndBytesConfig #Funktionalität Hugging Face Modelle
+from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer, pipeline, BitsAndBytesConfig, Mistral3ForConditionalGeneration #Funktionalität Hugging Face Modelle
 # import accelerate #Für Anwendung der Berechnungen auf GPUs
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate #Prompt Templates
 from langchain_core.prompt_values import StringPromptValue
@@ -37,11 +38,14 @@ FILE_PATH = sys.argv[1] #Pfad zu den Dateien, welche verarbeitet werden sollen
 #Konfiguration der Modelle
 
 print("Initializing embedding model...")
-model_kwargs = {'device': 'cuda:3'} #Argumente für Embedding Modell
+model_kwargs = {'device': 'cuda:3',
+                "trust_remote_code": "True",
+                "model_kwargs": {"dtype": "bfloat16",}} #Argumente für Embedding Modell
 encode_kwargs = {'normalize_embeddings': True} #Argumente für Codierung der Textsequenzen
-model_embedding = HuggingFaceEmbeddings(model_name="/mount/point/veith/Models/multilingual-e5-large-instruct", model_kwargs=model_kwargs, encode_kwargs=encode_kwargs) #auslagern der Rechenleistung auf GPU
+model_embedding_path = "/mount/point/veith/Models/multilingual-e5-large-instruct"
+model_embedding = HuggingFaceEmbeddings(model_name=model_embedding_path, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs) #auslagern der Rechenleistung auf GPU
 #wird benutzt falls eigene Dateien hochgeladen wurden, aber das standardmäßige Embeddingmodell verwendet wird
-tokenizer_embedding = AutoTokenizer.from_pretrained("/mount/point/veith/Models/multilingual-e5-large-instruct")
+tokenizer_embedding = AutoTokenizer.from_pretrained(model_embedding_path)
 
 # print("Do you want to use a specific Embedding Model to vectorize your document(s) (Y/n)?")
 # answ_embedding = str(input())
@@ -90,48 +94,218 @@ tokenizer_embedding = AutoTokenizer.from_pretrained("/mount/point/veith/Models/m
 
 print("Initializing LLM...")
 
-max_memory = {0: "60GB"}# if answ_embedding.lower() in ["y", "yes", "ye", "ja"] else None #Nutzen des max_memory Mappings für die GPUs nur falls ein spezifisches Embedding Modell verwendet wird, um so GPU VRAM zu schonen
+max_memory = {0: "28GB", 1: "28GB", 2: "28GB", 3: "28GB"}# if answ_embedding.lower() in ["y", "yes", "ye", "ja"] else None #Nutzen des max_memory Mappings für die GPUs nur falls ein spezifisches Embedding Modell verwendet wird, um so GPU VRAM zu schonen
 #Quantisierungskonfiguration, falls diese benötigt wird
-quantization = BitsAndBytesConfig(load_in_4bit=True,
+quantization_4bit = BitsAndBytesConfig(load_in_4bit=True,
                                   bnb_4bit_use_double_quant=True,
                                   bnb_4bit_quant_type="nf4",
                                   bnb_4bit_compute_dtype=torch.bfloat16,
-                                  # load_in_8bit=True,
                                   ) #Quantisierungkonfiguration für 4-Bit oder 8-Bit Quantisierung
+quantization_8bit = BitsAndBytesConfig(load_in_8bit=True,) #Quantisierungkonfiguration für 8-Bit Quantisierung
 
 # Frage nach zu verwendendem Modell
 print("Which text generation model do you want to use?")
 print("1.\tLlama-3.1-8B-Instruct")
 print("2.\tLlama-3.1-70B-Instruct (4bit quantized)")
-print("3.\tQwen2.5-14B-Instruct-1M")
-print("4.\tQwen3-14B")
+print("3.\tQwen3-14B")
+print("4.\tMagistral-Small-2509 (8bit quantized)")
 model_question = int(input("Please answer by typing in the corresponding model number: "))
 
-if model_question == 1:
-    model_path = '/mount/point/veith/Models/Llama-3.1-8B-Instruct'
+# Dictionary der Modellkonfigurationen
+MODEL_CONFIGS = {
+    1: {
+        "name": "Llama-3.1-8B-Instruct",
+        "path": "/mount/point/veith/Models/Llama-3.1-8B-Instruct",
+        "model_class": AutoModelForCausalLM,
+        "quantization": None,
+        "special_tokenizer_args": {"padding_side": "left"},
+        "special_model_args": {},
+        "token_family": "llama",
+        "reasoning": False
+    },
+    2: {
+        "name": "Llama-3.1-70B-Instruct",
+        "path": "/mount/point/veith/Models/Llama-3.1-70B-Instruct",
+        "model_class": AutoModelForCausalLM,
+        "quantization": quantization_4bit,
+        "special_tokenizer_args": {"padding_side": "left"},
+        "special_model_args": {},
+        "token_family": "llama",
+        "reasoning": False
+    },
+    3: {
+        "name": "Qwen3-14B",
+        "path": "/mount/point/veith/Models/Qwen3-14B",
+        "model_class": AutoModelForCausalLM,
+        "quantization": None,
+        "special_tokenizer_args": {"padding_side": "left"},
+        "special_model_args": {},
+        "token_family": "qwen",
+        "reasoning": True
+    },
+    4: {
+        "name": "Magistral-Small-2509",
+        "path": "/mount/point/veith/Models/Magistral-Small-2509",
+        "model_class": Mistral3ForConditionalGeneration,
+        "quantization": quantization_8bit,
+        "special_tokenizer_args": {"tokenizer_type": "mistral", "use_fast": False},
+        "special_model_args": {},
+        "token_family": "mistral",
+        "reasoning": True
+    }
+}
 
-elif model_question == 2:
-    model_path = "/mount/point/veith/Models/Llama-3.1-70B-Instruct"
+def initialize_model(model_choice: int):
+    """
+    Initialize model and tokenizer based on user choice.
+    
+    Args:
+        model_choice (int): Model number from user selection
+        
+    Returns:
+        tuple: (model, tokenizer, model_path)
+    """
+    if model_choice not in MODEL_CONFIGS:
+        print(f"Invalid model choice {model_choice}. Defaulting to Qwen3-14B.")
+        model_choice = 4
+    
+    config = MODEL_CONFIGS[model_choice]
+    model_path = config["path"]
+    
+    print(f"Initializing {config['name']}...")
+    
+    # Initialisieren tokenizer
+    tokenizer_args = config["special_tokenizer_args"].copy()
+    tokenizer = AutoTokenizer.from_pretrained(model_path, **tokenizer_args)
+    
+    # Standard Modell args
+    model_args = {
+        "device_map": "auto",
+        "attn_implementation": "flash_attention_2",
+        "dtype": torch.bfloat16,
+    }
+    
+    # Quantisierung, falls benötigt
+    if config["quantization"] is not None:
+        model_args["quantization_config"] = config["quantization"]
+    
+    # Hinzufügen modellspezifischer args
+    model_args.update(config["special_model_args"])
+    
+    # Initialisieren des Modells mit der korrekten Klasse
+    model = config["model_class"].from_pretrained(model_path, **model_args)
+    
+    # Anwenden des eval Modus, falls spezifiziert
+    if config["special_model_args"].get("eval_mode", False):
+        model = model.eval()
+    
+    return model, tokenizer, model_path
 
-elif model_question == 3:
-    model_path = "/mount/point/veith/Models/Qwen3-14B"
+# Modellinitialisierung
+model, tokenizer, model_path = initialize_model(model_question)
 
-else:
-    model_path = "/mount/point/veith/Models/Qwen3-14B"
-
-tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') #Initialisieren des Tokenizers
-model = AutoModelForCausalLM.from_pretrained(model_path,
-                                             # device='cuda:0'
-                                             device_map="auto", #Initialisieren des Modells #Idealfall für Parallelisierung auf GPUs #Auswahl aus ["auto", "balanced", "balanced_low_0", "sequential"]
-                                             #max_memory= max_memory #max memory falls benötigt und andere GPUs in Nutzung
-                                             quantization_config=quantization if model_question == 2 else None,
-                                             #attn_implementation="flash_attention_2", 
-                                             torch_dtype=torch.bfloat16, #Konfiguration für Anwendung von flash_attention
-                                             ) 
 decode_kwargs={'skip_special_tokens':True}
 streamer = TextStreamer(tokenizer, skip_prompt=True, **decode_kwargs)
 
-print(f"You are now talking to the {model_path.split('/')[-1]} Model.")
+time.sleep(2)
+print(f"You are now talking to the {MODEL_CONFIGS[model_question]['name']} Model.")
+
+TOKEN_FAMILIES = {
+    "llama": {
+        "SYSTEM_START": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>",
+        "USER_START": "<|start_header_id|>user<|end_header_id|>",
+        "ASSISTANT_START": "<|start_header_id|>assistant<|end_header_id|>",
+        "TURN_END": "<|eot_id|>",
+        "REASONING_OFF": "",
+        "REASONING_ON": "",
+        "REASONING_END": "</think>"
+    },
+    "qwen": {
+        "SYSTEM_START": "<|im_start|>system",
+        "USER_START": "<|im_start|>user",
+        "ASSISTANT_START": "<|im_start|>assistant",
+        "TURN_END": "<|im_end|>",
+        "REASONING_OFF": "<|im_start|>assistant\n<think>\n\n</think>",
+        "REASONING_ON": "<|im_start|>assistant",
+        "REASONING_END": "</think>"
+    },
+    "mistral": {
+        "SYSTEM_START": "<s>[SYSTEM_PROMPT]",
+        "USER_START": "[/SYSTEM_PROMPT][INST]",
+        "ASSISTANT_START":"[/INST]</s>",
+        "TURN_END": "", # kein eigenes Turn Token, wird mittels user und assistant Token definiert
+        "REASONING_OFF": "[/INST]",
+        "REASONING_ON": "[/INST]First draft your thinking process (inner monologue) until you arrive at a response. Format your response using Markdown, and use LaTeX for any mathematical equations. Write both your thoughts and the response in the same language as the input.\nYour thinking process must follow the template below:[THINK]Your thoughts or/and draft, like working through an exercise on scratch paper. Be as casual and as long as you want until you are confident to generate the response. Use the same language as the input.[/THINK]Here, provide a self-contained response.",
+        "REASONING_END": "[/THINK]"
+    }
+}
+
+# Übersetzung modellspezifischer Tokens mit default reasoning off
+def translate_tokens(prompt: str, model_choice: int) -> str:
+    """Translate modellspecific tokens in a prompt to the tokens of the specified model."""
+    if model_choice not in MODEL_CONFIGS:
+        model_choice = 4 # Default to Qwen3-14B if invalid choice
+    config = MODEL_CONFIGS[model_choice] # Beschaffen der Modellkonfiguration
+    token_family = config["token_family"] # Beschaffen der Modellfamilie
+    special_tokens = TOKEN_FAMILIES[token_family] # Abrufen der Spezialtokens der Modellfamilie
+    # Definieren der speziellen Strings
+    parsing_string = special_tokens["ASSISTANT_START"]
+    parsing_string_user = special_tokens["USER_START"]
+
+    # Ersetzen der Tokens im Prompt
+    for key in special_tokens:
+        prompt = prompt.replace(key, special_tokens[key])
+    
+    # Ausnahmefall, dass es sich um ein Reasoning-Modell handelt
+    if config["reasoning"] == True:
+        prompt = prompt.replace(special_tokens["ASSISTANT_START"], special_tokens["REASONING_OFF"]) # default abschalten vom Reasoning
+    
+    return prompt, parsing_string, parsing_string_user
+
+# Promptdefinition
+
+#Prompt Definition zur Kontextualisierung von chunks
+
+prompt_contextualize = PromptTemplate.from_template("""SYSTEM_START
+
+Your task is to situate a chunk of text within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
+<document>
+{context}
+</document> 
+TURN_ENDUSER_START
+
+Here is the chunk we want to situate within the whole document 
+<chunk> 
+{input}
+</chunk>
+Please give a short succinct and concise context to situate this chunk within the overall document. Write at most 3 sentences.TURN_END
+ASSISTANT_START
+""")
+
+# Prompt zum erstellen einer Suchquery für RAG-Anwendungen
+
+prompt_query = PromptTemplate.from_template("""SYSTEM_START
+
+Your task is to convert the Input into database search terms with natural language.
+Format the answer like this:
+SEARCH: [search terms]
+STRICT FORMAT REQUIREMENTS:
+1. Start your response with exactly "SEARCH: " (including the space)
+2. Follow with the search terms (single line, no explanations)
+3. Do NOT add any text before or after the required format
+
+Given a question or input, return a single search term optimized to retrieve the most relevant results from a search engine.
+If there are acronyms or words you are not familiar with, do not try to rephrase them.
+
+TURN_ENDUSER_START
+
+Input: {input}TURN_END
+ASSISTANT_START
+""")
+
+# Übersetzen der Prompts in die modellspezifische Schreibweise
+for prompt in [prompt_contextualize, prompt_query]:
+    prompt.template, parsing_string, parsing_string_user = translate_tokens(prompt.template, model_question)
 
 # Funktionsdefinition
 
@@ -414,25 +588,6 @@ def format_docs(docs):
 #######################################################################################################################################################################################################
 #Definition von default Größen bei der Kontextualisierung von Dokumenten
 #######################################################################################################################################################################################################
-
-#Prompt Definition zur Kontextualisierung von chunks
-
-prompt_contextualize = PromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-Your task is to situate a chunk of text within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
-<document>
-{context}
-</document> 
-<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-Here is the chunk we want to situate within the whole document 
-<chunk> 
-{input}
-</chunk>
-Please give a short succinct and concise context to situate this chunk within the overall document. Write at most 3 sentences.<|eot_id|>
-<|start_header_id|>assistant<|end_header_id|>
-""")
-
 
 #Definition des Sprachmodells # Verwendung von Pipeline Manager um Speicher zu sparen
 config_context = {
@@ -851,40 +1006,10 @@ def rag_env_expand(vector_store_path: str, directory: str = None, file_paths: st
 #Textgenerierungsfunktionen
 ##################################################################################################################################################################################################
 
-prompt_query = PromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-Your task is to convert the Input into database search terms with natural language.
-Format the answer like this:
-SEARCH: [search]
-
-Given a question or input, return a single search term optimized to retrieve the most relevant results from a search engine.
-If there are acronyms or words you are not familiar with, do not try to rephrase them.
-
-<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-Input: {input}<|eot_id|>
-<|start_header_id|>assistant<|end_header_id|>
-""")
-
-# Anpassen der Tokens an das verwendete Modell falls nicht default Llama verwendet wird
-if "llama" not in model_path.lower():
-    prompts = [prompt_contextualize, prompt_query]
-
-    # Ändern der Tokens
-    for prompt in prompts:
-        for key in llama_translator:
-            prompt.template = prompt.template.replace(key, llama_translator[key]) 
-
-if "qwen3" in model_path.lower():
-    # Gemeinsames deaktivieren der Qwen3 Denkprozesse NACHDEM die Tokens angepasst wurden, ansonsten führt dies zu Bugs
-    prompt_contextualize.template = prompt_contextualize.template.replace("<|im_start|>assistant", "<|im_start|>assistant\n<think>\n\n</think>") # Diese Tokens deaktivieren Denkprozess bei Qwen3
-    prompt_query.template = prompt_query.template.replace("<|im_start|>assistant", "<|im_start|>assistant\n<think>\n\n</think>") # Diese Tokens deaktivieren Denkprozess bei Qwen3
-
 @chain
 def query_parser(query: str):
     """Parses the output of the query analyzer, so it only returns the search_query"""
     new_query = query.split(sep="SEARCH: ", maxsplit=-1)[-1]
-    new_query = new_query.split(sep=parsing_chat_turn_token)[0]
     task_description = "Given a web search query, retrieve relevant passages that are relevant to the query."
     task = f'Instruct: {task_description}\nQuery: {new_query}' #Ausgabe für Instruction trainierte Embedding Modelle #new_query fungiert als geeigneter Suchbegriff und task_description beschreibt den Suchkontext
     # Struktur der Task ist modellspezifisch anzupassen

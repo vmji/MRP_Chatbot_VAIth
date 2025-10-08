@@ -22,12 +22,14 @@ import RAG_functions as rag
 #Import der Modelle aus der Datei RAG_functions.py
 model_embedding = rag.model_embedding
 model = rag.model
+model_config = rag.MODEL_CONFIGS[rag.model_question]
+model_tokens = rag.TOKEN_FAMILIES[model_config['token_family']]
 
 #Prompt Templates für Chats
 
 # mit RAG
 
-prompt_rag_chat = ChatPromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+prompt_rag_chat = ChatPromptTemplate.from_template("""SYSTEM_START
 
 Your name is VAIth. Be concise in your answers.
 You are a helpful assistant and can use the following context to better assist the user:
@@ -40,33 +42,28 @@ If the context is irrelevant to the dialogue with the user, you may ignore it.
 If the context is relevant to the interaction with the user you MUST refer to it and cite the passages you are referencing in your answer.
 The following is the current chat history:
 {chat_history}
-<|eot_id|><|start_header_id|>user<|end_header_id|>
+TURN_ENDUSER_START
 
 User: {input}
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+TURN_ENDASSISTANT_START
 """)
 
 # ohne RAG
 
-prompt_chat = ChatPromptTemplate.from_template("""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+prompt_chat = ChatPromptTemplate.from_template("""SYSTEM_START
 
 Your name is VAIth. Be concise in your answers. You are a helpful assistant and expected to assist the user.
 The following is the current chat history:
 {chat_history}
-<|eot_id|><|start_header_id|>user<|end_header_id|>
+TURN_ENDUSER_START
 
 User: {input}
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+TURN_ENDASSISTANT_START
 """)
 
-# Anpassen der Tokens an das verwendete Modell falls nicht default Llama verwendet wird
-if "llama" not in rag.model_path.lower():
-    prompts = [prompt_rag_chat, prompt_chat]
-
-    # Ändern der Tokens
-    for prompt in prompts:
-        for key in rag.llama_translator:
-            prompt.messages[0].prompt.template = prompt.messages[0].prompt.template.replace(key, rag.llama_translator[key])
+# Übersetzen der Prompts in die modellspezifische Schreibweise
+for prompt in [prompt_rag_chat, prompt_chat]: # prompt.messages[0].prompt.template = prompt.messages[0].prompt.template
+    prompt.messages[0].prompt.template, parsing_string, parsing_string_user = rag.translate_tokens(prompt.messages[0].prompt.template, rag.model_question)
 
 # Frage ob RAG verwendet werden soll #Darauf folgt Neudefinition von CHAT_MODE
 
@@ -92,6 +89,11 @@ def retrieval_fuse_output(x: list, k = num_k): #Hilfsfunktion, welche bewirkt, d
 
 FILE_PATH = sys.argv[1]
 URL = sys.argv[2:]
+
+manifest_path = f"{FILE_PATH.rsplit(sep='/', maxsplit=2)[0]}/exports.manifest"
+if os.path.exists(manifest_path):
+    os.remove(manifest_path)
+    print("Removed existing manifest file.")
 
 # Hilfsgröße zur Angabe des Speicherpfads für personalisierte Vektordatenbank
 vdb_save_dir = FILE_PATH.rsplit(sep='/', maxsplit=2)[0] #örtliches Userverzeichnis
@@ -190,15 +192,18 @@ chat_history = ChatMessageHistory() #Initialisieren des Chatverlaufs
 def get_chat_history(_):
     return chat_history
 
+# List zum Speichern der Pfade der erstellten Chatverläufe
+saved_files = []
+
 
 if __name__ == "__main__":
 
     print("Before we begin, do you wish to further customize the text generation parameters?\n(Y/n)")
     customization = str(input())
     if customization.lower() in ["y", "yes", "ja", "ye"]: #anpassen der Textgenerierungsparameter
-        if 'Qwen3'.lower() in rag.model_path.lower():
+        if model_config['reasoning'] == True: # Fall, dass es sich um ein Reasoning-Modell handelt
             detailed_thinking_question = str(input("Do you wish for the model to apply reasoning thinking during the chat? (Y/n) ")) # Frage ob Modell Denkprozesse während Textgenerierung ausüben soll
-            detailed_thinking_qwen3 = "<|im_start|>assistant" if detailed_thinking_question.lower() in ["y", "yes", "ja", "ye"] else "<|im_start|>assistant\n<think>\n\n</think>" # Ersetzen eines anderen Promptelements, weil bei Qwen3 das Denken nicht im Systemprompt festgelegt wird
+            detailed_thinking = model_tokens["REASONING_ON"] if detailed_thinking_question.lower() in ["y", "yes", "ja", "ye"] else model_tokens["REASONING_OFF"] # Ersetzen eines anderen Promptelements
         temperature = float(input("Please enter your desired text generation temperature as a positive float value: ")) #Frage nach der gewünschten Temperatur
         max_tokens = int(input("Please enter the number your desired threshold of generated tokens: ")) #Frage nach der gewünschten menge an generierten Tokens
         print_sources = True
@@ -210,8 +215,8 @@ if __name__ == "__main__":
         max_tokens = 1000
         print_sources = True
         # Defaultsmäßig werden Denkparameter für Generierung deaktiviert
-        if 'Qwen3'.lower() in rag.model_path.lower():
-            detailed_thinking_qwen3 = "<|im_start|>assistant\n<think>\n\n</think>" # Ersetzen eines anderen Promptelements, weil bei Qwen3 das Denken nicht im Systemprompt festgelegt wird # Standardmäßig wird das Denken deaktiviert
+        if model_config['reasoning'] == True: # Fall, dass es sich um ein Reasoning-Modell handelt
+            detailed_thinking = model_tokens["REASONING_OFF"] # Standardmäßig wird das Denken deaktiviert
     
     # Anpassen der Textgenerierungsparameter gemäß Nutzerwünschen
     config_text_gen = {
@@ -221,16 +226,11 @@ if __name__ == "__main__":
     llm = rag.llm_pipe_manager.get_pipeline(**config_text_gen) # Anpassen des Pipelinemanagers des Modells gemäß Nutzerwünschen
 
     llm_query = rag.llm_query_pipe_manager.get_pipeline()
-    
-    #Frage nach Textgenerierungsparametern wird ausgelassen
-    # temperature = 0.6
-    # max_tokens = 1000
-    # print_sources = True
 
     # Verändern der Prompt Templates gemäß Wunsch nach detailliertem Denken
-    if 'Qwen3'.lower() in rag.model_path.lower():
-        prompt_rag_chat.messages[0].prompt.template = prompt_rag_chat.messages[0].prompt.template.replace('<|im_start|>assistant', detailed_thinking_qwen3) # einfügen der aktuellen Qwen3 Denkkonfiguration in den Prompt
-        prompt_chat.messages[0].prompt.template = prompt_chat.messages[0].prompt.template.replace('<|im_start|>assistant', detailed_thinking_qwen3) # einfügen der aktuellen Qwen3 Denkkonfiguration in den Prompt
+    if model_config['reasoning'] == True:
+        prompt_rag_chat.messages[0].prompt.template = prompt_rag_chat.messages[0].prompt.template.replace(model_tokens["REASONING_OFF"], detailed_thinking) # einfügen der aktuellen Denkkonfiguration in den Prompt
+        prompt_chat.messages[0].prompt.template = prompt_chat.messages[0].prompt.template.replace(model_tokens["REASONING_OFF"], detailed_thinking) # einfügen der aktuellen Denkkonfiguration in den Prompt
 
     print("VAIth: Welcome to the Chat! How may I help you?")
     print("You can type 'exit' to end the conversation. Type 'help' to see all available commands.")
@@ -239,7 +239,15 @@ if __name__ == "__main__":
         instruction = str(input("User: "))
 
         if instruction.lower() in ["exit", "quit", "bye"]:
-            print("Goodbye!")
+            print("VAIth: Goodbye!")
+            # Schreiben der Manifest Datei, falls Chatverläufe gespeichert wurden
+            if len(saved_files) > 0:
+                try:
+                    with open(manifest_path, 'w') as f:
+                        for path in saved_files:
+                            f.write(f"{path}\n")
+                except Exception as e:
+                    print(f"Could not write manifest file: {e}")
             break
         elif instruction.lower() in ["switch", "sw", "change"]:
             chat_mode = "RAG" if chat_mode == "Chat" else "Chat" #Falls der Chatmodus initial "Chat" war wird dieser nun zu "RAG" gewechselt
@@ -250,21 +258,21 @@ if __name__ == "__main__":
             print("\nexit\t--Type 'exit' to end the conversation and close the application.")
             print("\nswitch\t--Type 'switch' to change the conversation mode between normal chat mode and RAG chat mode.")
             print("\nconfigure\t--Type 'configure' to change the text generation parameters.")
-            # print("\n'save'\t--Type save to save the current chat history to a text file.")
+            print("\nsave\t--Type 'save' to save the current chat history to a text file.")
             print("\n")
             continue
 
         elif instruction.lower() in ["configure", "config", "settings"]:
             print("Please enter your desired parameters for text generation:")
             # Textgenerierungspipeline Konfiguration
-            if 'Qwen3'.lower() in rag.model_path.lower():
-                old_detailed_thinking_qwen3 = detailed_thinking_qwen3
+            if model_config['reasoning'] == True:
+                old_detailed_thinking = detailed_thinking
                 detailed_thinking_question = str(input("Do you wish for the model to apply reasoning thinking during the chat? (Y/n) ")) # Frage ob Modell Denkprozesse während Textgenerierung ausüben soll
-                detailed_thinking_qwen3 = "<|im_start|>assistant" if detailed_thinking_question.lower() in ["y", "yes", "ja", "ye"] else "<|im_start|>assistant\n<think>\n\n</think>" # Ersetzen eines anderen Promptelements, weil bei Qwen3 das Denken nicht im Systemprompt festgelegt wird
-                if old_detailed_thinking_qwen3 != detailed_thinking_qwen3: # Fallunterscheidung, je nachdem ob detailliertes Denken initial bereits vorhanden ist oder nicht
+                detailed_thinking = model_tokens["REASONING_ON"] if detailed_thinking_question.lower() in ["y", "yes", "ja", "ye"] else model_tokens["REASONING_OFF"] # Ersetzen eines anderen Promptelements
+                if old_detailed_thinking != detailed_thinking: # Fallunterscheidung, je nachdem ob detailliertes Denken initial bereits vorhanden ist oder nicht
                     # Verändern der Prompt Templates gemäß Wunsch nach detailliertem Denken
-                    prompt_rag_chat.messages[0].prompt.template = prompt_rag_chat.messages[0].prompt.template.replace(old_detailed_thinking_qwen3, detailed_thinking_qwen3) # einfügen der aktuellen Qwen3 Denkkonfiguration in den Prompt
-                    prompt_chat.messages[0].prompt.template = prompt_chat.messages[0].prompt.template.replace(old_detailed_thinking_qwen3, detailed_thinking_qwen3) # einfügen der aktuellen Qwen3 Denkkonfiguration in den Prompt
+                    prompt_rag_chat.messages[0].prompt.template = prompt_rag_chat.messages[0].prompt.template.replace(old_detailed_thinking, detailed_thinking) # einfügen der aktuellen Denkkonfiguration in den Prompt
+                    prompt_chat.messages[0].prompt.template = prompt_chat.messages[0].prompt.template.replace(old_detailed_thinking, detailed_thinking) # einfügen der aktuellen Denkkonfiguration in den Prompt
 
             temperature = float(input("Please enter your desired text generation temperature as a positive float value: ")) #Frage nach der gewünschten Temperatur
             max_tokens = int(input("Please enter the number your desired threshold of generated tokens: ")) #Frage nach der gewünschten menge an generierten Tokens
@@ -276,19 +284,19 @@ if __name__ == "__main__":
             }
             llm = rag.llm_pipe_manager.get_pipeline(**config_text_gen) # Anpassen des Pipelinemanagers des Modells gemäß Nutzerwünschen
             continue
-        # TO-DO: Korrektheit des angegebenen Codes überprüfen.
-        # Beachte: Export benötigt zusätzlichen ssh Befehl, um die Datei auf den lokalen Rechner zu übertragen.
-        # elif instruction.lower() in ["save", "store", "export"]:
-        #     save_path = str(input("Please enter the full path (including filename and .txt ending) where you want to save the chat history: "))
-        #     try:
-        #         with open(save_path, 'w') as f:
-        #             for message in chat_history.messages:
-        #                 role = "User" if message.type == "human" else "VAIth"
-        #                 f.write(f"{role}: {message.content}\n")
-        #         print(f"Chat history successfully saved to {save_path}")
-        #     except Exception as e:
-        #         print(f"An error occurred while saving the chat history: {e}")
-        #     continue
+
+        elif instruction.lower() in ["save", "store", "export"]:
+            file_name = str(input("Please enter the file name to save the current chat history: "))
+            save_path = f"{FILE_PATH.rsplit(sep='/', maxsplit=2)[0]}/{file_name}.txt"
+            try:
+                with open(save_path, 'w') as f:
+                    for message in chat_history.messages:
+                        role = "User" if message.type == "human" else "VAIth"
+                        f.write(f"{role}: {message.content}\n")
+                saved_files.append(save_path) #Hinzufügen des Pfads der gespeicherten Datei in die Liste
+            except Exception as e:
+                print(f"An error occurred while saving the chat history: {e}")
+            continue
         else:
             chat_history.add_user_message(instruction) #Hinzufügen der User-Eingabe in den Chatverlauf #Nur Aufnahme der Usereingabe wenn Sie keinen Befehl darstellt
         
@@ -299,8 +307,8 @@ if __name__ == "__main__":
             print("VAIth: "); gen, response = rag.rag_gen(instruction, query_analysis=True, chat_history=get_chat_history,
                                         prompt=prompt, retriever=retriever, pipeline_textgen=llm, pipeline_rag_query=llm_query, print_sources=print_sources,)
             # Parsen vom Text falls das Modell Gedankengänge ausführt, damit das Kontextfenster nicht überladen wird
-            if "Qwen3".lower() in rag.model_path.lower():
-                response = response.split("</think>")[-1]
+            if model_config['reasoning'] == True:
+                response = response.split(model_tokens["REASONING_END"])[-1]
             chat_history.add_ai_message(response) #Hinzufügen der Modellausgabe zum Chatverlauf
         else:
             prompt = prompt_chat
@@ -312,10 +320,3 @@ if __name__ == "__main__":
                 chat_history.add_ai_message(response.split(f"{rag.parsing_string}\n")[-1]) #Hinzufügen der formatierten Modellausgabe zum Chatverlauf
             else: #theoretischer Natur falls in anderen Programmen Funktionalität einer kontextlosen Batchgenerierung notwendig wird
                 print("VAIth: "); response = chat_chain.batch(instruction)
-
-            
-
-# (Im Chat Modus) "switch" eingeben um von RAG zu normalem Chat zu wechseln oder umgekehrt
-# input.lower() in ["switch", "sw", "change"]
-# print(f"You are now in {current_mode}") mit Modi "RAG Chat mode" und "Chat mode"
-#Falls Modus gewechselt wird muss aktiver prompt verändert werden
